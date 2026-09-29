@@ -1,0 +1,17 @@
+{
+  "name": "server",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "test": "node --test",
+    "check": "node --check src/index.js && node --check src/sql.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "msnodesqlv8": "^5.3.0",
+    "mssql": "^11.0.1"
+  }
+}

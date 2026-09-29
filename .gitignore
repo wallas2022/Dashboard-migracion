@@ -1,0 +1,7 @@
+node_modules/
+web/dist/
+.env
+server/.env
+.runtime/
+.npm-cache/
+web/.vite/
