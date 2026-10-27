@@ -32,3 +32,13 @@ No publique `.env` ni use cuentas `sysadmin`. Huawei se activa con HUAWEI_ENABLE
 El retraso compara el último `fecha_sync` de KIO con `ultima_fecha_sync` de la validación más reciente en `DBA_Migracion.dbo.ValidacionDatos`; nunca utiliza la hora actual. En KIO se selecciona `TOP (1)` por `fecha_sync DESC, id_factura DESC`. La consulta está respaldada por el índice habilitado `IX_facturas_fecha_sync`, cuyas claves son `fecha_sync, id_factura` e incluye `fecha_facturacion`.
 
 Las fechas de negocio y restauración (`fecha_facturacion`, `fecha_sync`, `ultima_fecha_facturacion`, `ultima_fecha_sync`, `fecha_validacion`, `backup_start_date`, `backup_finish_date` y `restore_date`) son relojes locales de Guatemala almacenados en columnas SQL sin zona. La API las publica como texto `yyyy-MM-dd HH:mm:ss.SSS`, sin sufijo `Z`. `generatedAt` sí representa un instante UTC y conserva su formato ISO con `Z`.
+
+## Verificación actual — 8 de octubre de 2026
+
+Se revisó la copia de C:\Users\walte\Nextcloud\documentación\Proyectos\TerraController\TerraController_Migration_Dashboard. Git no tenía cambios pendientes al iniciar la revisión. Se conservó el .env existente y no se modificaron bases ni archivos SQL.
+
+- Local sigue desactivada (LOCAL_ENABLED=false). Los archivos C:\SQLData\TerraController\DATA\TerraController.mdf y C:\SQLData\TerraController\LOG\TerraController_log.ldf no existen. La base figura RECOVERY_PENDING; la prueba de lectura devolvió error SQL 945. Las rutas registradas en sys.master_files no prueban que los archivos estén disponibles. Antes de reactivarla se necesita recuperar la base con autorización y validar su lectura.
+- Huawei está habilitado y su conexión funciona: DNS resolvió y TCP 1433 respondió. TerraController en GTM-HC-SQL001 estaba ONLINE, en STANDBY y solo lectura. Funcionaron las consultas de estado, tablas (472), jobs (1), historial de restauraciones (100 registros) y último punto de negocio. El timeout documentado en septiembre es un antecedente, no el resultado actual.
+- El último TRN observado fue TerraController_LogBackup_20261007_140000.trn, restaurado con estado EXITOSO el 8 de octubre a las 16:40:11.927, hora local de Guatemala. El último fecha_sync observado fue 2026-10-07 13:59:35.000. Son resultados de esta revisión y pueden cambiar mientras los jobs continúan.
+
+No se requirieron cambios de código para este diagnóstico. La retirada de Local de la interfaz y la integración de TerraControllerDataSync solicitadas previamente siguen siendo tareas de desarrollo separadas: esta revisión no las implementa.
