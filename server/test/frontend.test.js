@@ -32,11 +32,11 @@ test('frontend preserves a Guatemala SQL wall clock without subtracting six hour
   assert.equal(formatGuatemalaSqlDate('2026-09-01T13:59:35.000Z'), 'Fecha no válida');
 });
 
-test('frontend renders lag label and both compared synchronization points', async () => {
+test('frontend renders Huawei lag and both compared synchronization points', async () => {
   const source = await readFile(new URL('../../web/src/main.jsx', import.meta.url), 'utf8');
-  assert.match(source, /s\.lagLabel/);
+  assert.match(source, /s\.huaweiLag/);
   assert.match(source, /data\.business\.kio\?\.latestSync/);
-  assert.match(source, /data\.business\.local\?\.latestSync/);
+  assert.match(source, /data\.business\.huawei\?\.latestSync/);
 });
 
 test('frontend references the real Servicios Compartidos logo with accessible alt text', async () => {

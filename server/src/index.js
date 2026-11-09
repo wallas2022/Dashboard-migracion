@@ -3,24 +3,27 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { demoData } from './demo-data.js';
-import { configFor, queries, withPool, classifySqlError, serializeSqlError } from './sql.js';
+import { configFor, queries, syncQueries, SYNC_DATABASE, withPool, classifySqlError, serializeSqlError } from './sql.js';
 import { dashboardResponse } from './dashboard.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(here, '../../.env') });
 const app = express();
 app.disable('x-powered-by');
 const mode = process.env.DASHBOARD_MODE || 'demo';
-const localEnabled = process.env.LOCAL_ENABLED === 'true';
 if (!['demo', 'live'].includes(mode)) throw new Error('DASHBOARD_MODE debe ser demo o live');
-async function collect(prefix) {
+async function collect(prefix, set = queries, database = 'TerraController') {
   return withPool(configFor(prefix), async adapter => {
-    const environment = (await adapter.query(queries.environment))[0];
-    if (!environment) throw new Error('Base TerraController no encontrada o no visible');
+    const environment = (await adapter.query(set.environment))[0];
+    if (!environment) {
+      // DataSync puede no existir aún en Huawei: no es un error, solo "no creada".
+      if (set === syncQueries) return { environment: null, notCreated: true, queryWarnings: [] };
+      throw new Error(`Base ${database} no encontrada o no visible`);
+    }
     const result = { environment, queryWarnings: [] };
-    const names = ['tables', 'jobs', ...(prefix === 'LOCAL' ? ['restoreHistory', 'validation'] : prefix === 'HUAWEI' ? ['restoreHistory', 'latestBusinessPoint'] : ['latestBusinessPoint'])];
+    const names = ['tables', 'jobs', ...(prefix === 'HUAWEI' ? ['restoreHistory', 'latestBusinessPoint'] : ['latestBusinessPoint'])];
     for (const name of names) {
       const field = name === 'restoreHistory' ? 'history' : name;
-      try { const rows = await adapter.query(queries[name]); result[field] = ['validation', 'latestBusinessPoint'].includes(name) ? rows[0] || null : rows; }
+      try { const rows = await adapter.query(set[name]); result[field] = name === 'latestBusinessPoint' ? rows[0] || null : rows; }
       catch (error) { result[field] = null; result.queryWarnings.push({ query: name, error }); }
     }
     return result;
@@ -31,7 +34,8 @@ let pending;
 app.get('/api/dashboard', async (_req, res) => {
   if (mode === 'demo') return res.json({ ...demoData, generatedAt: new Date().toISOString() });
   try {
-    pending ||= Promise.allSettled([localEnabled ? collect('LOCAL') : Promise.resolve(), collect('KIO'), ...(process.env.HUAWEI_ENABLED === 'true' ? [collect('HUAWEI')] : [])]).then(([local, kio, huawei]) => dashboardResponse(localEnabled ? local : undefined, kio, (source, error) => ({ source, category: classifySqlError(error), ...serializeSqlError(error) }), huawei)).finally(() => { pending = null; });
+    const huaweiOn = process.env.HUAWEI_ENABLED === 'true';
+    pending ||= Promise.allSettled([collect('KIO'), huaweiOn ? collect('HUAWEI') : Promise.resolve(), collect('KIO', syncQueries, SYNC_DATABASE), huaweiOn ? collect('HUAWEI', syncQueries, SYNC_DATABASE) : Promise.resolve()]).then(([kio, huawei, syncKio, syncHuawei]) => dashboardResponse(kio, (source, error) => ({ source, category: classifySqlError(error), ...serializeSqlError(error) }), huaweiOn ? huawei : undefined, { kio: syncKio, huawei: huaweiOn ? syncHuawei : undefined })).finally(() => { pending = null; });
     const result = await pending;
     res.status(result.httpStatus).json(result.body);
   } catch { res.status(500).json({ error: 'No fue posible procesar las métricas SQL.' }); }

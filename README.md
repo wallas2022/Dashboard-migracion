@@ -1,6 +1,6 @@
 # TerraController Migration Dashboard
 
-Dashboard local para comparar KIO, la réplica Local y el futuro ambiente Huawei.
+Dashboard local para comparar KIO (origen) con la réplica Huawei, para las bases TerraController y TerraControllerDataSync.
 
 ## Inicio rápido
 
@@ -11,9 +11,9 @@ Dashboard local para comparar KIO, la réplica Local y el futuro ambiente Huawei
 
 ## Activar datos reales
 
-Local está desactivada (`LOCAL_ENABLED=false`): no se abren conexiones ni se consultan sus métricas o historiales, y su ausencia no genera alertas. Para reactivarla sería necesario establecer `LOCAL_ENABLED=true` y reiniciar la API. El monitoreo activo utiliza KIO y Huawei.
+El ambiente Local fue retirado (9 de noviembre de 2026): ya no hay conexión, consultas, columnas ni variables `LOCAL_*` en el código. El monitoreo utiliza KIO y Huawei.
 
-Local utiliza autenticación integrada de Windows (`LOCAL_SQL_AUTH=windows`). Configure una cuenta SQL de solo lectura para KIO, complete `.env` y cambie `DASHBOARD_MODE=live`. La API escucha únicamente en `http://127.0.0.1:3100`.
+Configure una cuenta SQL de solo lectura para KIO, complete `.env` y cambie `DASHBOARD_MODE=live`. La API escucha únicamente en `http://127.0.0.1:3100`.
 
 Para una ejecución estable, use `npm run build` y después `npm start`; en ese modo todo el dashboard queda disponible en `http://localhost:3100`.
 
@@ -42,3 +42,11 @@ Se revisó la copia de C:\Users\walte\Nextcloud\documentación\Proyectos\TerraCo
 - El último TRN observado fue TerraController_LogBackup_20261007_140000.trn, restaurado con estado EXITOSO el 8 de octubre a las 16:40:11.927, hora local de Guatemala. El último fecha_sync observado fue 2026-10-07 13:59:35.000. Son resultados de esta revisión y pueden cambiar mientras los jobs continúan.
 
 No se requirieron cambios de código para este diagnóstico. La retirada de Local de la interfaz y la integración de TerraControllerDataSync solicitadas previamente siguen siendo tareas de desarrollo separadas: esta revisión no las implementa.
+
+## TerraControllerDataSync — 9 de noviembre de 2026
+
+El dashboard monitorea también `TerraControllerDataSync` en KIO y Huawei (pestaña **DataSync**): estado, inventario de tablas, jobs (p. ej. `Backup_Log_TerraControllerDataSync`), retraso y cadena full + logs. El punto de referencia es el último `FechaEvento` de `DataSync.Logs` (índice `IX_Logs_FechaEvento`). Requiere que `db_dashboard` tenga lectura en esa base. Si la base no existe en Huawei se muestra "No creada" sin generar alertas. Las cadenas de `RestauracionLog` se separan por `base_datos`; las filas con `base_datos` nulo se siguen atribuyendo a `TerraController`. Tomar backups o restaurar sigue siendo tarea del DBA: el dashboard solo lee.
+
+## Retiro de Local — 9 de noviembre de 2026
+
+Se eliminó la réplica Local del código, la interfaz, las pruebas y los datos demo. La API ya no publica `data.local`, `chains.local` ni `business.local`; el retraso se mide solo entre KIO y Huawei (`summary.huaweiLag`). Las variables `LOCAL_*` del `.env` quedan sin uso y pueden borrarse. La dependencia `msnodesqlv8` (autenticación Windows) ya no se necesita y puede retirarse de `package.json` cuando se desee.

@@ -24,8 +24,52 @@ export function calculateLag(source, destination) {
   const minutes = Math.floor((a - b) / 60000);
   return { lagMinutes: minutes, lagStatus: minutes ? 'behind' : 'current', lagLabel: durationLabel(minutes) };
 }
-export function dashboardResponse(localResult, kioResult, failureFor, huaweiResult) {
-  const results = { local: localResult, kio: kioResult, huawei: huaweiResult };
+const ENV_NAMES = { kio: 'KIO', huawei: 'Huawei' };
+function entriesFrom(history) {
+  return (history || []).map(row => ({ file: String(row.archivo).split(/[\\/]/).pop(), firstLsn: row.first_lsn == null ? null : decimalLsn(row.first_lsn), lastLsn: row.last_lsn == null ? null : decimalLsn(row.last_lsn), sizeMb: Number(row.tamano_mb || 0), status: String(row.estado || ''), restoreDate: row.restore_date }));
+}
+export function dataSyncSection(syncResults = {}, failureFor, name = 'TerraControllerDataSync') {
+  const data = {}, warnings = [];
+  for (const key of ['kio', 'huawei']) {
+    const result = syncResults[key];
+    data[key] = result?.status === 'fulfilled' ? result.value : null;
+    if (result?.status === 'rejected') warnings.push(failureFor(`${key.toUpperCase()}_DATASYNC`, result.reason));
+    for (const warning of data[key]?.queryWarnings || []) warnings.push(failureFor(`${key.toUpperCase()}_DATASYNC_${warning.query}`, warning.error));
+  }
+  const business = {};
+  for (const key of ['kio', 'huawei']) {
+    const point = data[key]?.latestBusinessPoint;
+    business[key] = { latestId: point?.id_factura ?? null, latestEvent: point?.fecha_facturacion ?? null, latestSync: point?.fecha_sync ?? null };
+  }
+  const environments = ['kio', 'huawei'].map(key => {
+    const base = { key, name: ENV_NAMES[key], role: key === 'kio' ? 'Producción / origen' : 'Réplica' };
+    if (!syncResults[key]) return { ...base, role: 'Conexión desactivada', status: 'disabled', databaseState: 'DESACTIVADA', readOnly: null };
+    if (data[key]?.notCreated) return { ...base, status: 'notcreated', databaseState: 'NO CREADA', readOnly: null };
+    const env = data[key]?.environment;
+    if (data[key]?.queryWarnings?.some(w => [945, 926, 942, 916, 4060].includes(w.error?.number))) return { ...base, status: 'offline', databaseState: 'INACCESIBLE', readOnly: env?.is_read_only ?? null };
+    return { ...base, status: !env ? 'offline' : env.is_in_standby ? 'standby' : env.state_desc === 'ONLINE' ? 'online' : 'offline', databaseState: env?.is_in_standby ? 'STANDBY' : env?.state_desc || 'SIN DATOS', readOnly: env?.is_read_only ?? null };
+  });
+  const tableMap = new Map();
+  for (const key of ['kio', 'huawei']) for (const table of data[key]?.tables || []) {
+    const id = `${table.schema}.${table.table}`;
+    const row = tableMap.get(id) || { schema: table.schema, table: table.table, kioRows: null, huaweiRows: null, sizeGb: null, huaweiSizeGb: null };
+    row[`${key}Rows`] = Number(table.row_count);
+    if (key === 'kio') row.sizeGb = Number(table.size_gb); else row.huaweiSizeGb = Number(table.size_gb);
+    tableMap.set(id, row);
+  }
+  const tables = [...tableMap.values()].map(row => ({ ...row, huaweiDifference: row.kioRows == null || row.huaweiRows == null ? null : row.kioRows - row.huaweiRows }));
+  const jobMap = new Map();
+  for (const key of ['kio', 'huawei']) for (const job of data[key]?.jobs || []) {
+    const row = jobMap.get(job.name) || { name: job.name, kio: 'Sin datos', huawei: 'Sin datos' };
+    row[key] = job.enabled ? 'Habilitado' : 'Deshabilitado'; jobMap.set(job.name, row);
+  }
+  const history = data.huawei?.history;
+  const entries = entriesFrom(history);
+  const chain = { status: !syncResults.huawei ? 'disabled' : data.huawei?.notCreated ? 'notcreated' : !history ? 'unavailable' : entries.length ? 'available' : 'empty', entries, continuous: entries.every(row => row.firstLsn && row.lastLsn) ? hasContinuousLsnChain(entries) : null, totalMb: entries.reduce((sum, row) => sum + row.sizeMb, 0), error: warnings.find(w => w.source === 'HUAWEI_DATASYNC_restoreHistory' || w.source === 'HUAWEI_DATASYNC') || null };
+  return { database: name, environments, business, tables, jobs: [...jobMap.values()], chain, huaweiLag: calculateLag(business.kio.latestSync, business.huawei.latestSync), warnings };
+}
+export function dashboardResponse(kioResult, failureFor, huaweiResult, syncResults) {
+  const results = { kio: kioResult, huawei: huaweiResult };
   const data = {}, warnings = [];
   for (const [key, result] of Object.entries(results)) {
     data[key] = result?.status === 'fulfilled' ? result.value : null;
@@ -33,39 +77,38 @@ export function dashboardResponse(localResult, kioResult, failureFor, huaweiResu
     for (const warning of data[key]?.queryWarnings || []) warnings.push(failureFor(`${key.toUpperCase()}_${warning.query}`, warning.error));
   }
   const business = {};
-  for (const key of ['kio', 'local', 'huawei']) {
-    const point = key === 'local' ? data[key]?.validation : data[key]?.latestBusinessPoint;
-    business[key] = { latestInvoice: point?.id_factura ?? point?.ultima_factura ?? null, latestInvoiceDate: point?.fecha_facturacion ?? point?.ultima_fecha_facturacion ?? null, latestSync: point?.fecha_sync ?? point?.ultima_fecha_sync ?? null, validation: point?.resultado || 'SIN DATOS' };
+  for (const key of ['kio', 'huawei']) {
+    const point = data[key]?.latestBusinessPoint;
+    business[key] = { latestInvoice: point?.id_factura ?? null, latestInvoiceDate: point?.fecha_facturacion ?? null, latestSync: point?.fecha_sync ?? null };
   }
-  Object.assign(business, business.local);
   const tableMap = new Map();
-  for (const key of ['kio', 'local', 'huawei']) for (const table of data[key]?.tables || []) {
+  for (const key of ['kio', 'huawei']) for (const table of data[key]?.tables || []) {
     const id = `${table.schema}.${table.table}`;
-    const row = tableMap.get(id) || { schema: table.schema, table: table.table, kioRows: null, localRows: null, huaweiRows: null, sizeGb: null, huaweiSizeGb: null };
+    const row = tableMap.get(id) || { schema: table.schema, table: table.table, kioRows: null, huaweiRows: null, sizeGb: null, huaweiSizeGb: null };
     row[`${key}Rows`] = Number(table.row_count);
     if (key === 'kio') row.sizeGb = Number(table.size_gb);
     if (key === 'huawei') row.huaweiSizeGb = Number(table.size_gb);
     tableMap.set(id, row);
   }
-  const tables = [...tableMap.values()].map(row => ({ ...row, difference: row.kioRows == null || row.localRows == null ? null : row.kioRows - row.localRows, huaweiDifference: row.kioRows == null || row.huaweiRows == null ? null : row.kioRows - row.huaweiRows }));
+  const tables = [...tableMap.values()].map(row => ({ ...row, huaweiDifference: row.kioRows == null || row.huaweiRows == null ? null : row.kioRows - row.huaweiRows }));
   const jobMap = new Map();
-  for (const key of ['kio', 'local', 'huawei']) for (const job of data[key]?.jobs || []) {
-    const row = jobMap.get(job.name) || { name: job.name, kio: 'Sin datos', local: 'Sin datos', huawei: 'Sin datos' };
+  for (const key of ['kio', 'huawei']) for (const job of data[key]?.jobs || []) {
+    const row = jobMap.get(job.name) || { name: job.name, kio: 'Sin datos', huawei: 'Sin datos' };
     row[key] = job.enabled ? 'Habilitado' : 'Deshabilitado'; jobMap.set(job.name, row);
   }
-  const chains = {};
-  for (const key of ['local', 'huawei']) {
-    const history = data[key]?.history;
-    const entries = (history || []).map(row => ({ file: String(row.archivo).split(/[\\/]/).pop(), firstLsn: row.first_lsn == null ? null : decimalLsn(row.first_lsn), lastLsn: row.last_lsn == null ? null : decimalLsn(row.last_lsn), sizeMb: Number(row.tamano_mb || 0), status: String(row.estado || ''), restoreDate: row.restore_date }));
-    chains[key] = { status: !results[key] ? 'disabled' : !history ? 'unavailable' : entries.length ? 'available' : 'empty', entries, continuous: entries.every(row => row.firstLsn && row.lastLsn) ? hasContinuousLsnChain(entries) : null, totalMb: entries.reduce((sum, row) => sum + row.sizeMb, 0), error: warnings.find(w => w.source === `${key.toUpperCase()}_restoreHistory` || w.source === key.toUpperCase()) || null };
-  }
-  const environments = ['kio', 'local', 'huawei'].map(key => {
+  const history = data.huawei?.history;
+  const entries = entriesFrom(history);
+  const chains = { huawei: { status: !results.huawei ? 'disabled' : !history ? 'unavailable' : entries.length ? 'available' : 'empty', entries, continuous: entries.every(row => row.firstLsn && row.lastLsn) ? hasContinuousLsnChain(entries) : null, totalMb: entries.reduce((sum, row) => sum + row.sizeMb, 0), error: warnings.find(w => w.source === 'HUAWEI_restoreHistory' || w.source === 'HUAWEI') || null } };
+  const environments = ['kio', 'huawei'].map(key => {
     const env = data[key]?.environment;
-    if (!results[key]) return { key, name: key === 'local' ? 'Local' : key === 'huawei' ? 'Huawei' : 'KIO', role: 'Conexión desactivada', status: 'disabled', databaseState: 'DESACTIVADA', readOnly: null };
+    const base = { key, name: ENV_NAMES[key], role: key === 'kio' ? 'Producción / origen' : 'Réplica' };
+    if (!results[key]) return { ...base, role: 'Conexión desactivada', status: 'disabled', databaseState: 'DESACTIVADA', readOnly: null };
     const unavailable = data[key]?.queryWarnings?.some(warning => [945, 926, 942].includes(warning.error?.number));
-    if (unavailable) return { key, name: key === 'kio' ? 'KIO' : key === 'local' ? 'Local' : 'Huawei', role: key === 'kio' ? 'Producción / origen' : 'Réplica', status: 'offline', databaseState: 'INACCESIBLE', readOnly: env?.is_read_only ?? null };
-    return { key, name: key === 'kio' ? 'KIO' : key === 'local' ? 'Local' : 'Huawei', role: key === 'kio' ? 'Producción / origen' : 'Réplica', status: !results[key] ? 'pending' : !env ? 'offline' : env.is_in_standby ? 'standby' : env.state_desc === 'ONLINE' ? 'online' : 'offline', databaseState: env?.is_in_standby ? 'STANDBY' : env?.state_desc || 'SIN DATOS', readOnly: env?.is_read_only ?? null };
+    if (unavailable) return { ...base, status: 'offline', databaseState: 'INACCESIBLE', readOnly: env?.is_read_only ?? null };
+    return { ...base, status: !env ? 'offline' : env.is_in_standby ? 'standby' : env.state_desc === 'ONLINE' ? 'online' : 'offline', databaseState: env?.is_in_standby ? 'STANDBY' : env?.state_desc || 'SIN DATOS', readOnly: env?.is_read_only ?? null };
   });
+  const dataSync = dataSyncSection(syncResults, failureFor);
+  warnings.push(...dataSync.warnings);
   const available = Object.values(data).some(Boolean);
-  return { httpStatus: available ? 200 : 503, body: { generatedAt: new Date().toISOString(), mode: 'live', status: !available ? 'error' : warnings.length ? 'partial' : 'ok', data, warnings, environments, business, tables, jobs: [...jobMap.values()], chains, chain: chains.local.entries, summary: { ...calculateLag(business.kio.latestSync, business.local.latestSync), huaweiLag: calculateLag(business.kio.latestSync, business.huawei.latestSync), logsPending: null, transferredMb: chains.local.totalMb } } };
+  return { httpStatus: available ? 200 : 503, body: { generatedAt: new Date().toISOString(), mode: 'live', status: !available ? 'error' : warnings.length ? 'partial' : 'ok', data, warnings, dataSync, environments, business, tables, jobs: [...jobMap.values()], chains, chain: chains.huawei.entries, summary: { huaweiLag: calculateLag(business.kio.latestSync, business.huawei.latestSync), logsPending: null, transferredMb: chains.huawei.totalMb } } };
 }

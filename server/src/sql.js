@@ -7,15 +7,6 @@ function bool(value, fallback = false) {
 
 export function configFor(prefix) {
   const timeout = Number(process.env[`${prefix}_SQL_TIMEOUT_MS`] || 15000);
-  if (prefix === 'LOCAL') {
-    if ((process.env.LOCAL_SQL_AUTH || 'windows') !== 'windows') throw new Error('LOCAL_SQL_AUTH debe ser "windows"');
-    const driver = process.env.LOCAL_SQL_ODBC_DRIVER || 'ODBC Driver 17 for SQL Server';
-    const server = process.env.LOCAL_SQL_SERVER || 'localhost';
-    const address = bool(process.env.LOCAL_SQL_USE_TCP) ? `tcp:${server},${process.env.LOCAL_SQL_PORT || 1433}` : server;
-    const encryption = (process.env.LOCAL_SQL_ENCRYPT || 'false').toLowerCase();
-    const encrypt = encryption === 'optional' ? 'Optional' : ['yes', 'true'].includes(encryption) ? 'Yes' : 'No';
-    return { __driver: 'msnodesqlv8', __timeoutMs: timeout, connectionString: `Driver={${driver}};Server=${address};Database=${process.env.LOCAL_SQL_DATABASE || 'master'};Trusted_Connection=Yes;Encrypt=${encrypt};TrustServerCertificate=${bool(process.env.LOCAL_SQL_TRUST_CERT, true) ? 'Yes' : 'No'};`, requestTimeout: timeout, connectionTimeout: timeout, options: { useUTC: false } };
-  }
   return {
     __driver: 'tedious', __timeoutMs: timeout,
     server: process.env[`${prefix}_SQL_SERVER`],
@@ -72,13 +63,16 @@ export function serializeSqlError(error, depth = 0) {
   return result;
 }
 
-export const queries = {
-  environment: `
+export const SYNC_DATABASE = 'TerraControllerDataSync';
+const BASE_FILTER = db => `(base_datos = N'${db}' OR base_datos IS NULL)`;
+function inventoryQueries(db) {
+  return {
+    environment: `
     SELECT @@SERVERNAME AS server_name, d.state_desc, d.is_read_only,
            d.is_in_standby, d.recovery_model_desc
-    FROM sys.databases d WHERE d.name = N'TerraController';`,
-  tables: `
-    USE TerraController;
+    FROM sys.databases d WHERE d.name = N'${db}';`,
+    tables: `
+    USE ${db};
     SELECT s.name AS [schema], t.name AS [table],
       SUM(CASE WHEN ps.index_id IN (0,1) THEN ps.row_count ELSE 0 END) AS row_count,
       CAST(SUM(ps.reserved_page_count) * 8.0 / 1024 / 1024 AS decimal(18,2)) AS size_gb
@@ -86,13 +80,16 @@ export const queries = {
     JOIN sys.schemas s ON s.schema_id=t.schema_id
     JOIN sys.dm_db_partition_stats ps ON ps.object_id=t.object_id
     GROUP BY s.name,t.name ORDER BY size_gb DESC;`,
-  jobs: `
+    jobs: `
     USE msdb;
     SELECT DISTINCT j.name, j.enabled
     FROM dbo.sysjobs j JOIN dbo.sysjobsteps s ON s.job_id=j.job_id
-    WHERE s.database_name=N'TerraController' OR s.command LIKE N'%TerraController%'
-    ORDER BY j.name;`,
-  restoreHistory: `
+    WHERE s.database_name=N'${db}' OR s.command LIKE N'%${db}%'
+    ORDER BY j.name;`
+  };
+}
+function restoreHistoryQuery(db, strict) {
+  return `
     USE DBA_Migracion;
     SELECT TOP (100) restauracion_id, archivo,
       CONVERT(varchar(23), backup_start_date, 121) AS backup_start_date,
@@ -100,20 +97,29 @@ export const queries = {
       CONVERT(varchar(23), restore_date, 121) AS restore_date,
       CONVERT(varchar(30), first_lsn) AS first_lsn, CONVERT(varchar(30), last_lsn) AS last_lsn,
       tamano_mb, duracion_segundos, estado, mensaje
-    FROM dbo.RestauracionLog ORDER BY restauracion_id DESC;`,
-  validation: `
-    USE DBA_Migracion;
-    SELECT TOP (1) ultima_factura,
-      CONVERT(varchar(23), ultima_fecha_facturacion, 121) AS ultima_fecha_facturacion,
-      CONVERT(varchar(23), ultima_fecha_sync, 121) AS ultima_fecha_sync,
-      estado_base, is_in_standby, is_read_only, resultado,
-      CONVERT(varchar(23), fecha_validacion, 121) AS fecha_validacion
-    FROM dbo.ValidacionDatos ORDER BY validacion_id DESC;`,
+    FROM dbo.RestauracionLog WHERE ${strict ? `base_datos = N'${db}'` : BASE_FILTER(db)} ORDER BY restauracion_id DESC;`;
+}
+
+export const queries = {
+  ...inventoryQueries('TerraController'),
+  restoreHistory: restoreHistoryQuery('TerraController', false),
   latestBusinessPoint: `SELECT TOP (1) id_factura,
     CONVERT(varchar(23), fecha_facturacion, 121) AS fecha_facturacion,
     CONVERT(varchar(23), fecha_sync, 121) AS fecha_sync
     FROM TerraController.cw_core.facturas WHERE fecha_sync IS NOT NULL
     ORDER BY fecha_sync DESC, id_factura DESC;`
+};
+
+// TerraControllerDataSync: mismo esquema de monitoreo (full + logs) sobre otra base.
+// El punto de referencia es el último evento de DataSync.Logs (índice IX_Logs_FechaEvento).
+export const syncQueries = {
+  ...inventoryQueries(SYNC_DATABASE),
+  restoreHistory: restoreHistoryQuery(SYNC_DATABASE, true),
+  latestBusinessPoint: `SELECT TOP (1) IdLog AS id_factura,
+    CONVERT(varchar(23), FechaEvento, 121) AS fecha_facturacion,
+    CONVERT(varchar(23), FechaEvento, 121) AS fecha_sync
+    FROM ${SYNC_DATABASE}.DataSync.Logs WHERE FechaEvento IS NOT NULL
+    ORDER BY FechaEvento DESC, IdLog DESC;`
 };
 
 export { sql };

@@ -1,77 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifySqlError, configFor, createQueryAdapter, executeQuery, queries, serializeSqlError, withPool } from '../src/sql.js';
-import { calculateLag, dashboardResponse, decimalLsn, durationLabel, hasContinuousLsnChain, sqlLocalClockMilliseconds } from '../src/dashboard.js';
-
-test('LOCAL uses Shared Memory, Driver 17, Encrypt=No and no SQL credentials', () => {
-  const keys = ['LOCAL_SQL_AUTH', 'LOCAL_SQL_ODBC_DRIVER', 'LOCAL_SQL_SERVER', 'LOCAL_SQL_PORT', 'LOCAL_SQL_DATABASE', 'LOCAL_SQL_ENCRYPT', 'LOCAL_SQL_TRUST_CERT', 'LOCAL_SQL_USE_TCP'];
-  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
-  Object.assign(process.env, {
-    LOCAL_SQL_AUTH: 'windows', LOCAL_SQL_ODBC_DRIVER: 'ODBC Driver 17 for SQL Server',
-    LOCAL_SQL_SERVER: 'localhost', LOCAL_SQL_PORT: '1434', LOCAL_SQL_DATABASE: 'master',
-    LOCAL_SQL_ENCRYPT: 'false', LOCAL_SQL_TRUST_CERT: 'true', LOCAL_SQL_USE_TCP: 'false'
-  });
-  try {
-    const config = configFor('LOCAL');
-    assert.equal(config.__driver, 'msnodesqlv8');
-    assert.equal(config.__timeoutMs, 15000);
-    assert.equal(config.connectionString, 'Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=master;Trusted_Connection=Yes;Encrypt=No;TrustServerCertificate=Yes;');
-    assert.doesNotMatch(config.connectionString, /tcp:|,1434|password|pwd=|uid=|user id=/i);
-  } finally {
-    for (const key of keys) previous[key] === undefined ? delete process.env[key] : process.env[key] = previous[key];
-  }
-});
-
-test('LOCAL optionally builds a TCP server address with port', () => {
-  const oldUseTcp = process.env.LOCAL_SQL_USE_TCP;
-  const oldServer = process.env.LOCAL_SQL_SERVER;
-  const oldPort = process.env.LOCAL_SQL_PORT;
-  Object.assign(process.env, { LOCAL_SQL_USE_TCP: 'true', LOCAL_SQL_SERVER: 'sql-local', LOCAL_SQL_PORT: '1434' });
-  try { assert.match(configFor('LOCAL').connectionString, /;Server=tcp:sql-local,1434;/); }
-  finally {
-    oldUseTcp === undefined ? delete process.env.LOCAL_SQL_USE_TCP : process.env.LOCAL_SQL_USE_TCP = oldUseTcp;
-    oldServer === undefined ? delete process.env.LOCAL_SQL_SERVER : process.env.LOCAL_SQL_SERVER = oldServer;
-    oldPort === undefined ? delete process.env.LOCAL_SQL_PORT : process.env.LOCAL_SQL_PORT = oldPort;
-  }
-});
-
-test('LOCAL selects Driver 17 and Encrypt=No from the environment', () => {
-  const oldDriver = process.env.LOCAL_SQL_ODBC_DRIVER;
-  const oldEncrypt = process.env.LOCAL_SQL_ENCRYPT;
-  process.env.LOCAL_SQL_ODBC_DRIVER = 'ODBC Driver 17 for SQL Server';
-  process.env.LOCAL_SQL_ENCRYPT = 'No';
-  try {
-    const config = configFor('LOCAL');
-    assert.match(config.connectionString, /^Driver=\{ODBC Driver 17 for SQL Server\};/);
-    assert.match(config.connectionString, /;Encrypt=No;/);
-  } finally {
-    oldDriver === undefined ? delete process.env.LOCAL_SQL_ODBC_DRIVER : process.env.LOCAL_SQL_ODBC_DRIVER = oldDriver;
-    oldEncrypt === undefined ? delete process.env.LOCAL_SQL_ENCRYPT : process.env.LOCAL_SQL_ENCRYPT = oldEncrypt;
-  }
-});
-
-test('LOCAL selects Driver 18 and emits Encrypt=Optional exactly', () => {
-  const oldDriver = process.env.LOCAL_SQL_ODBC_DRIVER;
-  const oldEncrypt = process.env.LOCAL_SQL_ENCRYPT;
-  process.env.LOCAL_SQL_ODBC_DRIVER = 'ODBC Driver 18 for SQL Server';
-  process.env.LOCAL_SQL_ENCRYPT = 'Optional';
-  try {
-    const config = configFor('LOCAL');
-    assert.match(config.connectionString, /^Driver=\{ODBC Driver 18 for SQL Server\};/);
-    assert.match(config.connectionString, /;Encrypt=Optional;/);
-    assert.doesNotMatch(config.connectionString, /(?:UID|PWD|User ID|Password)=/i);
-  } finally {
-    oldDriver === undefined ? delete process.env.LOCAL_SQL_ODBC_DRIVER : process.env.LOCAL_SQL_ODBC_DRIVER = oldDriver;
-    oldEncrypt === undefined ? delete process.env.LOCAL_SQL_ENCRYPT : process.env.LOCAL_SQL_ENCRYPT = oldEncrypt;
-  }
-});
-
-test('LOCAL rejects SQL authentication', () => {
-  const oldValue = process.env.LOCAL_SQL_AUTH;
-  process.env.LOCAL_SQL_AUTH = 'sql';
-  try { assert.throws(() => configFor('LOCAL'), /debe ser "windows"/); }
-  finally { oldValue === undefined ? delete process.env.LOCAL_SQL_AUTH : process.env.LOCAL_SQL_AUTH = oldValue; }
-});
+import { classifySqlError, configFor, createQueryAdapter, executeQuery, queries, syncQueries, serializeSqlError, withPool } from '../src/sql.js';
+import { calculateLag, dashboardResponse, dataSyncSection, decimalLsn, durationLabel, hasContinuousLsnChain, sqlLocalClockMilliseconds } from '../src/dashboard.js';
 
 test('executeQuery uses the public request().query() API and returns recordset', async () => {
   const calls = [];
@@ -143,7 +73,7 @@ test('SQL local datetime format is parsed without a timezone suffix', () => {
   assert.equal(sqlLocalClockMilliseconds('2026-09-01T13:59:35.000Z'), null);
 });
 
-test('lag calculates zero, minutes and several days from KIO minus LOCAL', () => {
+test('lag calculates zero, minutes and several days from KIO minus destination', () => {
   assert.deepEqual(calculateLag('2026-09-01 13:59:35.000', '2026-09-01 13:59:35.000'),
     { lagMinutes: 0, lagStatus: 'current', lagLabel: 'Al día' });
   assert.deepEqual(calculateLag('2026-09-01 14:44:35.000', '2026-09-01 13:59:35.000'),
@@ -163,14 +93,13 @@ test('lag reports anomaly when KIO is earlier and pending for null dates', () =>
 test('dashboard date and KIO point queries are read-only and serialize local SQL clocks', () => {
   assert.match(queries.latestBusinessPoint, /TOP \(1\)[\s\S]*WHERE fecha_sync IS NOT NULL[\s\S]*ORDER BY[\s\S]*fecha_sync DESC,[\s\S]*id_factura DESC/i);
   assert.match(queries.latestBusinessPoint, /CONVERT\(varchar\(23\), fecha_sync, 121\)/i);
-  assert.match(queries.validation, /CONVERT\(varchar\(23\), ultima_fecha_sync, 121\)/i);
   assert.match(queries.restoreHistory, /CONVERT\(varchar\(23\), restore_date, 121\)/i);
-  for (const query of [queries.latestBusinessPoint, queries.validation, queries.restoreHistory]) {
+  for (const query of [queries.latestBusinessPoint, queries.restoreHistory]) {
     assert.doesNotMatch(query, /\b(?:INSERT|UPDATE|DELETE|MERGE|BACKUP|RESTORE)\b/i);
   }
 });
 
-test('LOCAL and KIO pools use the same executeQuery adapter and close', async () => {
+test('KIO and Huawei pools use the same executeQuery adapter and close', async () => {
   const instances = [];
   class FakePool {
     constructor(config) { this.config = config; this.closed = false; instances.push(this); }
@@ -269,30 +198,25 @@ test('withPool response is bounded even if pool.close never settles', async () =
 const sample = { environment: { state_desc: 'ONLINE' }, tables: [], jobs: [], history: [], validation: null };
 const failureFor = source => ({ source, category: 'TIMEOUT', message: `No fue posible conectar con ${source}.` });
 
-test('dashboard returns partial data when only LOCAL succeeds', () => {
-  const result = dashboardResponse({ status: 'fulfilled', value: sample }, { status: 'rejected', reason: new Error('down') }, failureFor);
-  assert.equal(result.httpStatus, 200); assert.equal(result.body.status, 'partial');
-  assert.equal(result.body.data.local, sample); assert.equal(result.body.data.kio, null);
-});
-
 test('dashboard returns partial data when only KIO succeeds', () => {
-  const result = dashboardResponse({ status: 'rejected', reason: new Error('down') }, { status: 'fulfilled', value: sample }, failureFor);
+  const result = dashboardResponse({ status: 'fulfilled', value: sample }, failureFor, { status: 'rejected', reason: new Error('down') });
   assert.equal(result.httpStatus, 200); assert.equal(result.body.status, 'partial');
-  assert.equal(result.body.data.local, null); assert.equal(result.body.data.kio, sample);
+  assert.equal(result.body.data.kio, sample); assert.equal(result.body.data.huawei, null);
+  assert.equal(result.body.data.local, undefined);
+  assert.deepEqual(result.body.environments.map(e => e.key), ['kio', 'huawei']);
 });
 
 test('dashboard returns 503 only when all enabled sources fail', () => {
   const rejected = { status: 'rejected', reason: new Error('down') };
-  const result = dashboardResponse(rejected, rejected, failureFor);
+  const result = dashboardResponse(rejected, failureFor, rejected);
   assert.equal(result.httpStatus, 503); assert.equal(result.body.status, 'error');
   assert.equal(result.body.warnings.length, 2);
 });
 
-
-test('Huawei remains available when both other sources fail', () => {
+test('Huawei remains available when KIO fails', () => {
   const down = { status: 'rejected', reason: new Error('down') };
   const huawei = { ...sample, tables: [{ schema: 'dbo', table: 'only_huawei', row_count: 12, size_gb: 1 }], jobs: [{ name: 'HuaweiJob', enabled: false }], latestBusinessPoint: { id_factura: 123, fecha_sync: '2026-09-21 10:00:00.000' } };
-  const {body,httpStatus} = dashboardResponse(down,down,failureFor,{status:'fulfilled',value:huawei});
+  const {body,httpStatus} = dashboardResponse(down,failureFor,{status:'fulfilled',value:huawei});
   assert.equal(httpStatus,200);
   assert.equal(body.status,'partial');
   assert.equal(body.tables[0].huaweiRows,12);
@@ -300,64 +224,78 @@ test('Huawei remains available when both other sources fail', () => {
   assert.equal(body.tables[0].huaweiDifference,null);
   assert.equal(body.jobs[0].huawei,'Deshabilitado');
   assert.equal(body.business.huawei.latestInvoice,123);
-  assert.equal(body.environments[2].status,'online');
+  assert.equal(body.environments[1].status,'online');
 });
 
-test('Huawei connection failure produces a warning without hiding KIO and Local', () => {
+test('Huawei connection failure produces a warning without hiding KIO', () => {
   const up={status:'fulfilled',value:sample};
-  const {body}=dashboardResponse(up,up,failureFor,{status:'rejected',reason:new Error('down')});
+  const {body}=dashboardResponse(up,failureFor,{status:'rejected',reason:new Error('down')});
   assert.equal(body.status,'partial');
   assert.equal(body.warnings[0].source,'HUAWEI');
-  assert.equal(body.environments[2].status,'offline');
+  assert.equal(body.environments[1].status,'offline');
   assert.equal(body.business.huawei.latestInvoice,null);
 });
 
 test('Huawei query permissions failure preserves its environment and marks missing data', () => {
-  const up={status:'fulfilled',value:sample};
   const huawei={...sample,tables:null,jobs:null,queryWarnings:[{query:'tables',error:new Error('denied')}]};
   const kio={...sample,tables:[{schema:'dbo',table:'t',row_count:10,size_gb:2}]};
-  const {body}=dashboardResponse(up,{status:'fulfilled',value:kio},failureFor,{status:'fulfilled',value:huawei});
+  const {body}=dashboardResponse({status:'fulfilled',value:kio},failureFor,{status:'fulfilled',value:huawei});
   assert.equal(body.status,'partial');
   assert.equal(body.tables[0].huaweiRows,null);
   assert.equal(body.warnings[0].source,'HUAWEI_tables');
-  assert.equal(body.environments[2].status,'online');
+  assert.equal(body.environments[1].status,'online');
 });
 
 test('Huawei rows and business lag compare against KIO', () => {
   const data=rows=>({...sample,tables:[{schema:'dbo',table:'t',row_count:rows,size_gb:1}],latestBusinessPoint:{fecha_sync:rows===20?'2026-09-21 10:30:00.000':'2026-09-21 10:00:00.000'}});
   const up=value=>({status:'fulfilled',value});
-  const {body}=dashboardResponse(up(sample),up(data(20)),failureFor,up(data(12)));
+  const {body}=dashboardResponse(up(data(20)),failureFor,up(data(12)));
   assert.equal(body.tables[0].huaweiDifference,8);
   assert.equal(body.summary.huaweiLag.lagMinutes,30);
 });
 
-
-test('log chains stay isolated by server and retain exact LSNs', () => {
+test('Huawei log chain retains exact LSNs', () => {
   const entry=(file,first,last)=>({archivo:file,first_lsn:first,last_lsn:last,tamano_mb:2,estado:'restored',restore_date:'2026-09-21 10:00:00.000'});
   const up=value=>({status:'fulfilled',value});
-  const local={...sample,history:[entry('local.trn','103826000014809200001','103826000014809300001')]};
   const huawei={...sample,history:[entry('huawei-new.trn','103826000014809200001','103826000014809300001'),entry('huawei-old.trn','103826000014809100001','103826000014809200001')]};
-  const {body}=dashboardResponse(up(local),up(sample),failureFor,up(huawei));
-  assert.equal(body.chains.local.entries.length,1);
-  assert.equal(body.chains.local.entries[0].file,'local.trn');
-  assert.equal(body.chains.local.continuous,null);
+  const {body}=dashboardResponse(up(sample),failureFor,up(huawei));
+  assert.equal(body.chains.local, undefined);
   assert.equal(body.chains.huawei.entries.length,2);
   assert.equal(body.chains.huawei.entries[0].firstLsn,'103826000014809200001');
   assert.equal(body.chains.huawei.continuous,true);
   assert.equal(body.chains.huawei.totalMb,4);
-  assert.deepEqual(body.chain,body.chains.local.entries);
+  assert.deepEqual(body.chain,body.chains.huawei.entries);
 });
 
 test('chain distinguishes empty history, query failure and disabled server', () => {
   const up=value=>({status:'fulfilled',value});
-  let result=dashboardResponse(up(sample),up(sample),failureFor);
-  assert.equal(result.body.chains.local.status,'empty');
+  let result=dashboardResponse(up(sample),failureFor);
   assert.equal(result.body.chains.huawei.status,'disabled');
   const failed={...sample,history:null,queryWarnings:[{query:'restoreHistory',error:new Error('denied')}]};
-  result=dashboardResponse(up(failed),up(sample),failureFor,up(sample));
-  assert.equal(result.body.chains.local.status,'unavailable');
-  assert.equal(result.body.chains.local.continuous,null);
-  assert.equal(result.body.chains.local.error.source,'LOCAL_restoreHistory');
+  result=dashboardResponse(up(sample),failureFor,up(failed));
+  assert.equal(result.body.chains.huawei.status,'unavailable');
+  assert.equal(result.body.chains.huawei.continuous,null);
+  assert.equal(result.body.chains.huawei.error.source,'HUAWEI_restoreHistory');
+  result=dashboardResponse(up(sample),failureFor,up(sample));
   assert.equal(result.body.chains.huawei.status,'empty');
-  assert.equal(result.body.status,'partial');
+  assert.equal(result.body.status,'ok');
+});
+
+test('DataSync queries target TerraControllerDataSync and filter the restore log by base', () => {
+  assert.match(syncQueries.environment, /TerraControllerDataSync/);
+  assert.match(syncQueries.tables, /USE TerraControllerDataSync/);
+  assert.match(syncQueries.restoreHistory, /base_datos = N'TerraControllerDataSync'/);
+  assert.match(queries.restoreHistory, /base_datos = N'TerraController'/);
+  assert.match(syncQueries.latestBusinessPoint, /TOP \(1\)[\s\S]*DataSync\.Logs[\s\S]*ORDER BY FechaEvento DESC/i);
+});
+test('dataSync section marks Huawei as not created without warnings and computes lag', () => {
+  const failureFor = (source, error) => ({ source, message: error.message });
+  const kio = { status: 'fulfilled', value: { environment: { state_desc: 'ONLINE', is_in_standby: false, is_read_only: false }, tables: [{ schema: 'DataSync', table: 'Logs', row_count: 10, size_gb: 1 }], jobs: [{ name: 'Backup_Log_TerraControllerDataSync', enabled: 1 }], latestBusinessPoint: { id_factura: 5, fecha_sync: '2026-11-09 07:29:48.000' }, queryWarnings: [] } };
+  const huawei = { status: 'fulfilled', value: { environment: null, notCreated: true, queryWarnings: [] } };
+  const s = dataSyncSection({ kio, huawei }, failureFor);
+  assert.equal(s.environments[1].status, 'notcreated');
+  assert.equal(s.chain.status, 'notcreated');
+  assert.equal(s.warnings.length, 0);
+  assert.equal(s.tables[0].huaweiDifference, null);
+  assert.equal(s.huaweiLag.lagStatus, 'pending');
 });
