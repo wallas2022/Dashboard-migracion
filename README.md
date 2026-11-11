@@ -50,3 +50,44 @@ El dashboard monitorea también `TerraControllerDataSync` en KIO y Huawei (pesta
 ## Retiro de Local — 9 de noviembre de 2026
 
 Se eliminó la réplica Local del código, la interfaz, las pruebas y los datos demo. La API ya no publica `data.local`, `chains.local` ni `business.local`; el retraso se mide solo entre KIO y Huawei (`summary.huaweiLag`). Las variables `LOCAL_*` del `.env` quedan sin uso y pueden borrarse. La dependencia `msnodesqlv8` (autenticación Windows) ya no se necesita y puede retirarse de `package.json` cuando se desee.
+
+## Pestaña Corte — noviembre 2026
+
+Monitor en tiempo real del paso de Controller de KIO a Huawei (ventana desde el viernes 20:00 hasta el Go de las 09:30). Se actualiza cada 60 s con su propio `fetch` a `GET /api/corte`, separado de `/api/dashboard`. Cada fuente es independiente: si una falla, su sección muestra "Sin datos", la respuesta es `partial` y se agrega una advertencia. Solo lee: SELECT sobre DMV y GET HTTP; nada de backups, restores ni KILL.
+
+### Variables
+Todas están en `.env.example` (bloque "Pestaña Corte"). `HUAWEI_*` (SQL001) y `HUAWEI2_*` (SQL002, base `master`) se activan con `HUAWEI_ENABLED` / `HUAWEI2_ENABLED`. Para probar en QA, apúntelas a SQL63\MSSQLSERVER02 y SQL66. `CORTE_NGINX_LOG_URL` es obligatorio para el flujo, el mapa de calor, las peticiones por minuto, p95 y los 5xx; `CORTE_NGINX_STATUS_URL` para las conexiones activas del balanceador. `CORTE_EVENTS` usa `hora=etiqueta|etiqueta corta` en orden cronológico; la fase RECOVERY se reconoce por esa palabra.
+
+### Permisos del login de monitoreo (en SQL001, SQL002 y KIO; sin sysadmin)
+```sql
+GRANT VIEW SERVER STATE TO [dashboard_reader];     -- DMV de sesiones, esperas, schedulers, contadores, HADR, ring buffers
+GRANT VIEW ANY DEFINITION TO [dashboard_reader];   -- sys.availability_replicas, sys.tcp_endpoints, sys.databases
+```
+Todos los lotes empiezan con `SET LOCK_TIMEOUT 5000; SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;` y excluyen `@@SPID` y el `program_name` del monitor (`CORTE_MONITOR_APP`, que se envía como `Application Name`).
+
+### NGINX del balanceador 10.22.0.18
+```nginx
+log_format corte '$time_iso8601 $upstream_addr $status $upstream_response_time "$host" "$request_uri"';
+access_log /var/log/nginx/corte_access.log corte;
+
+location /nginx_status { stub_status; allow <IP del monitor>; deny all; }
+# Sirve las últimas líneas del log al monitor (solo desde la IP del monitor):
+location = /corte_access.log { alias /var/log/nginx/corte_access.log; allow <IP del monitor>; deny all; }
+```
+`$upstream_addr` es `IP:puerto`; el puerto identifica la aplicación. El monitor agrega por minuto (último minuto completo; 15 minutos de mapa de calor). Cuando un nodo no recibe tráfico de una aplicación que sí lo tuvo en el minuto, el flujo muestra una línea roja discontinua "sin respuesta".
+
+### CPU de WEB y del balanceador
+Cada nodo publica su CPU por HTTP (solo lectura) y se declara en `CORTE_CPU_URLS=Balanceador=http://IP:9100/cpu,WEB01=...,WEB02=...`. La respuesta debe ser `{"cpu": 38.5}` (o solo el número, 0 a 100). En Windows (WEB01/WEB02) basta un script PowerShell con `HttpListener` que lea `Win32_PerfFormattedData_PerfOS_Processor` (`_Total`); en el servidor Linux del balanceador, un script Python que lea `/proc/stat`. Abra el puerto elegido solo para la IP del monitor. Si un nodo no responde, muestra "Sin datos" y aparece la advertencia `CPU_<nodo>`.
+
+### Cálculos y persistencia
+- tx/s: diferencia de `Write Transactions/sec` (acumulado) contra la lectura anterior entre los segundos transcurridos. La primera lectura, o un contador que baja, da "Sin datos". Se suman TerraController y TerraControllerDataSync.
+- Primera escritura en Huawei: primer `MAX(last_user_update)` observado igual o posterior a la hora del RECOVERY; se guarda en `.runtime/corte-state.json`.
+- Historial: una muestra por minuto en `.runtime/corte-history.jsonl` (48 h), también con la pestaña cerrada (muestreo del servidor en modo `live`).
+- Estados de sesión son excluyentes: zombie = sleeping con `open_transaction_count > 0` e inactiva más de 60 s (no se cuenta además como sleeping); runnable cuenta como running en el pool. El Max Pool Size se compara contra el total de sesiones de la aplicación.
+- Las sesiones zombie solo se muestran; no hay botón para matarlas.
+
+### Cómo probarla
+1. `npm test` y `npm run check`.
+2. Demo: `DASHBOARD_MODE=demo`, `npm run dev`, abrir `http://localhost:5174/#corte` (o la pestaña **Corte**).
+3. QA: `DASHBOARD_MODE=live`, `HUAWEI_ENABLED=true` / `HUAWEI2_ENABLED=true` apuntando a SQL63 y SQL66 (AG_Controller y AG_DataSync), otorgar los permisos anteriores y reiniciar la API.
+4. **Exportar evidencia** descarga `evidencia-corte-AAAAMMDD-HHMMSS.png` con fecha y hora del estado actual.

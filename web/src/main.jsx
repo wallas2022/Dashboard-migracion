@@ -3,11 +3,12 @@ import { createRoot } from 'react-dom/client';
 import { RefreshCw, Server, TriangleAlert } from 'lucide-react';
 import { readApiJson, formatGuatemalaSqlDate } from './api.js';
 import { DataSyncView, Inventory, LogChains, Table } from './server-views.jsx';
+import { CorteView } from './corte-view.jsx';
 import logo from '../images/logoservicioscompartidos.jpg';
 import './styles.css';
 const fmt = value => value == null ? 'Sin datos' : new Intl.NumberFormat('es-GT').format(value);
 function App() {
-  const [data,setData]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[tab,setTab]=useState('resumen');
+  const [data,setData]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[tab,setTab]=useState(location.hash==='#corte'?'corte':'resumen');
   const request = useRef(null);
   const load = () => {
     request.current?.abort();
@@ -25,9 +26,9 @@ function App() {
   const s=data.summary||{};
   return <main>
     <header><div className="brand"><img className="brand-logo" src={logo} alt="Servicios Compartidos"/><div><span className="eyebrow">TERRACONTROLLER</span><h1>Centro de migración</h1></div></div><div className="header-actions"><span className={'mode '+data.mode}>{data.mode==='live'?'Datos en vivo':'Demostración'}</span><button onClick={load} disabled={loading}><RefreshCw size={16}/>{loading?'Actualizando…':'Actualizar'}</button></div></header>
-    <nav>{[['resumen','Resumen'],['tablas','Tablas'],['jobs','Jobs'],['historial','Cadena de logs'],['datasync','DataSync']].map(([key,label])=><button key={key} className={tab===key?'active':''} aria-pressed={tab===key} onClick={()=>setTab(key)}>{label}</button>)}</nav>
+    <nav>{[['resumen','Resumen'],['tablas','Tablas'],['jobs','Jobs'],['historial','Cadena de logs'],['datasync','DataSync'],['corte','Corte']].map(([key,label])=><button key={key} className={tab===key?'active':''} aria-pressed={tab===key} onClick={()=>setTab(key)}>{label}</button>)}</nav>
     {error&&<p className="warning" role="alert">{error} · Se conservan los últimos datos disponibles.</p>}
-    {data.warnings?.map((w,i)=><p className="warning" role="status" key={i}><strong>{w.source}</strong>: {w.message}</p>)}
+    {tab!=='corte'&&data.warnings?.map((w,i)=><p className="warning" role="status" key={i}><strong>{w.source}</strong>: {w.message}</p>)}
     {data.status==='error'&&<p className="warning" role="alert">No hay fuentes SQL disponibles. Revise las conexiones e intente actualizar.</p>}
     {tab==='resumen'&&<>
       <section className="env-grid">{data.environments.map(e=><article className={'env '+e.status} key={e.key}><div className="env-top"><Server/><span className="status">{e.status==='disabled'?'Desactivada':e.status}</span></div><h2>{e.name}</h2><p>{e.role}</p><dl><div><dt>Base</dt><dd>{e.databaseState}</dd></div><div><dt>Modo</dt><dd>{e.status==='disabled'?'No aplica':e.readOnly===true?'Solo lectura':e.readOnly===false?'Lectura/escritura':'Pendiente'}</dd></div></dl></article>)}</section>
@@ -38,6 +39,7 @@ function App() {
     {tab==='jobs'&&<section className="panel"><h3>Inventario de jobs</h3><Table heads={['Job','KIO','Huawei']} rows={data.jobs.map(j=>[j.name,j.kio,j.huawei])}/></section>}
     {tab==='historial'&&<LogChains chains={data.chains} syncChain={data.dataSync?.chain}/>}
     {tab==='datasync'&&<DataSyncView sync={data.dataSync}/>}
+    {tab==='corte'&&<CorteView/>}
     <footer>Actualizado {new Date(data.generatedAt).toLocaleString('es-GT',{timeZone:'America/Guatemala'})} · refresco automático cada 60 segundos</footer>
   </main>;
 }

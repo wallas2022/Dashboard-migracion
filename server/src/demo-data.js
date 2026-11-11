@@ -33,3 +33,5 @@ demoData.summary.huaweiLag = calculateLag(demoData.business.kio.latestSync, demo
 demoData.chains = {
   huawei: { status: 'available', entries: demoData.chain, continuous: hasContinuousLsnChain(demoData.chain), totalMb: demoData.summary.transferredMb }
 };
+
+export { demoCorte } from './demo-corte.js';
